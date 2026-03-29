@@ -1,0 +1,110 @@
+{
+  "materials": [
+    {
+      "id": "aac_block",
+      "name": "AAC Blocks",
+      "cost": "Low",
+      "cost_per_sqft": 45,
+      "strength": "Medium",
+      "durability": "High",
+      "best_use": ["partition_wall", "non_structural"],
+      "notes": "Lightweight, good thermal insulation, easy to cut"
+    },
+    {
+      "id": "red_brick",
+      "name": "Red Brick",
+      "cost": "Medium",
+      "cost_per_sqft": 80,
+      "strength": "High",
+      "durability": "Medium",
+      "best_use": ["load_bearing_wall", "general_walling"],
+      "notes": "Traditional material, good compressive strength, widely available"
+    },
+    {
+      "id": "rcc",
+      "name": "RCC",
+      "cost": "High",
+      "cost_per_sqft": 150,
+      "strength": "Very High",
+      "durability": "Very High",
+      "best_use": ["column", "slab", "beam"],
+      "notes": "Reinforced cement concrete, ideal for structural elements"
+    },
+    {
+      "id": "steel_frame",
+      "name": "Steel Frame",
+      "cost": "High",
+      "cost_per_sqft": 200,
+      "strength": "Very High",
+      "durability": "Very High",
+      "best_use": ["long_span", "column"],
+      "notes": "Best for spans greater than 5m, high tensile strength"
+    },
+    {
+      "id": "hollow_concrete_block",
+      "name": "Hollow Concrete Block",
+      "cost": "Low-Med",
+      "cost_per_sqft": 55,
+      "strength": "Medium",
+      "durability": "Medium",
+      "best_use": ["non_structural", "partition_wall"],
+      "notes": "Good for non-structural walls, reduces dead load"
+    },
+    {
+      "id": "fly_ash_brick",
+      "name": "Fly Ash Brick",
+      "cost": "Low",
+      "cost_per_sqft": 40,
+      "strength": "Medium-High",
+      "durability": "High",
+      "best_use": ["partition_wall", "load_bearing_wall", "general_walling"],
+      "notes": "Eco-friendly, uniform size, lower water absorption than red brick"
+    },
+    {
+      "id": "precast_concrete_panel",
+      "name": "Precast Concrete Panel",
+      "cost": "Med-High",
+      "cost_per_sqft": 120,
+      "strength": "High",
+      "durability": "Very High",
+      "best_use": ["structural_wall", "slab"],
+      "notes": "Factory-made precision, fast installation, excellent for structural walls"
+    }
+  ],
+  "score_map": {
+    "Low": 1,
+    "Low-Med": 2,
+    "Medium": 3,
+    "Medium-High": 3.5,
+    "Med-High": 4,
+    "High": 5,
+    "Very High": 6
+  },
+  "weights": {
+    "load_bearing_wall": {
+      "strength": 0.6,
+      "durability": 0.3,
+      "cost": 0.1
+    },
+    "partition_wall": {
+      "strength": 0.2,
+      "durability": 0.2,
+      "cost": 0.6
+    },
+    "slab": {
+      "strength": 0.5,
+      "durability": 0.4,
+      "cost": 0.1
+    },
+    "column": {
+      "strength": 0.65,
+      "durability": 0.3,
+      "cost": 0.05
+    },
+    "long_span": {
+      "strength": 0.7,
+      "durability": 0.25,
+      "cost": 0.05
+    }
+  }
+}
