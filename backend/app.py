@@ -9,15 +9,17 @@ Exposes:
 """
 
 import os
+import json
+import math
 import logging
 import traceback
 from typing import Optional
 
+import numpy as np
+import cv2
 from fastapi import FastAPI, File, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import numpy as np
-import cv2
 
 from pipeline.parser import parse_floor_plan, build_manual_result
 from pipeline.geometry import reconstruct_geometry
@@ -26,6 +28,28 @@ from pipeline.explainer import generate_report
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── Numpy JSON Fix ────────────────────────────────────────────────────────────
+
+class NumpyEncoder(json.JSONEncoder):
+    """Converts numpy types to native Python types for JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
+
+def to_json_safe(data):
+    """Recursively convert all numpy types in a dict to JSON-safe Python types."""
+    return json.loads(json.dumps(data, cls=NumpyEncoder))
+
+
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Autonomous Structural Intelligence System",
@@ -59,7 +83,6 @@ async def run_pipeline(file: UploadFile = File(...)):
     Returns: walls, rooms, 3D data, material recommendations, explanations.
     """
     try:
-        # Read uploaded image
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -82,7 +105,7 @@ async def run_pipeline(file: UploadFile = File(...)):
         # Build 3D-ready payload for Three.js
         three_payload = _build_three_payload(geometry_result)
 
-        return JSONResponse({
+        payload = {
             "success": True,
             "fallback_used": geometry_result.get("fallback_used", False),
             "parse": {
@@ -101,7 +124,9 @@ async def run_pipeline(file: UploadFile = File(...)):
             "three_js": three_payload,
             "materials": material_result,
             "report": report,
-        })
+        }
+
+        return JSONResponse(to_json_safe(payload))
 
     except HTTPException:
         raise
@@ -126,12 +151,15 @@ async def parse_only(file: UploadFile = File(...)):
         parse_result = parse_floor_plan(img)
         geometry_result = reconstruct_geometry(parse_result)
 
-        return JSONResponse({
+        payload = {
             "success": True,
             "parse": parse_result,
             "geometry": geometry_result,
             "three_js": _build_three_payload(geometry_result),
-        })
+        }
+
+        return JSONResponse(to_json_safe(payload))
+
     except Exception as e:
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
@@ -143,7 +171,7 @@ async def parse_only(file: UploadFile = File(...)):
 async def manual_input(data: dict = Body(...)):
     """
     Fallback clause: team manually defines wall coordinates.
-    This will be disclosed during demo as per hackathon rules.
+    Disclosed during demo as per hackathon rules.
 
     Body format:
     {
@@ -157,8 +185,10 @@ async def manual_input(data: dict = Body(...)):
         image_size = data.get("image_size", {"width": 800, "height": 600})
 
         if not walls:
-            raise HTTPException(status_code=400,
-                                detail="Provide at least one wall in 'walls' array")
+            raise HTTPException(
+                status_code=400,
+                detail="Provide at least one wall in 'walls' array"
+            )
 
         parse_result = build_manual_result(walls, image_size)
         geometry_result = reconstruct_geometry(parse_result)
@@ -166,7 +196,7 @@ async def manual_input(data: dict = Body(...)):
         report = generate_report(material_result, geometry_result)
         three_payload = _build_three_payload(geometry_result)
 
-        return JSONResponse({
+        payload = {
             "success": True,
             "fallback_used": True,
             "fallback_disclosed": data.get("disclose_fallback", True),
@@ -179,7 +209,10 @@ async def manual_input(data: dict = Body(...)):
             "three_js": three_payload,
             "materials": material_result,
             "report": report,
-        })
+        }
+
+        return JSONResponse(to_json_safe(payload))
+
     except HTTPException:
         raise
     except Exception as e:
@@ -192,8 +225,7 @@ async def manual_input(data: dict = Body(...)):
 def _build_three_payload(geometry_result: dict) -> dict:
     """
     Convert geometry to Three.js-ready format.
-    Coordinates are scaled to meters and centered at origin.
-    Each wall includes position, rotation, dimensions, and type.
+    Coordinates scaled to meters and centered at origin.
     """
     walls = geometry_result.get("walls", [])
     rooms = geometry_result.get("rooms", [])
@@ -209,7 +241,6 @@ def _build_three_payload(geometry_result: dict) -> dict:
 
     three_walls = []
     for wall in walls:
-        # Convert pixel coords to meters, centered at origin
         x1_m = (wall["x1"] - center_x) * scale
         y1_m = (wall["y1"] - center_y) * scale
         x2_m = (wall["x2"] - center_x) * scale
@@ -217,47 +248,42 @@ def _build_three_payload(geometry_result: dict) -> dict:
 
         length_m = wall.get("length_m", wall["length_px"] * scale)
 
-        # Center of wall for Three.js position
         pos_x = (x1_m + x2_m) / 2
-        pos_z = (y1_m + y2_m) / 2   # note: y in 2D = z in 3D
+        pos_z = (y1_m + y2_m) / 2
 
-        # Rotation in radians
-        import math
         rotation_y = 0.0 if wall["orientation"] == "horizontal" else math.pi / 2
 
         three_walls.append({
             "id": wall.get("id", "wall"),
             "position": {
-                "x": round(pos_x, 3),
-                "y": 1.5,            # half of 3m height
-                "z": round(pos_z, 3)
+                "x": round(float(pos_x), 3),
+                "y": 1.5,
+                "z": round(float(pos_z), 3),
             },
             "rotation_y": rotation_y,
             "dimensions": {
-                "width": round(length_m, 3),
-                "height": 3.0,       # standard floor height
-                "depth": 0.3         # standard wall thickness
+                "width": round(float(length_m), 3),
+                "height": 3.0,
+                "depth": 0.3,
             },
-            "load_bearing": wall.get("load_bearing", False),
+            "load_bearing": bool(wall.get("load_bearing", False)),
             "color": "#8B4513" if wall.get("load_bearing") else "#D2B48C",
             "orientation": wall.get("orientation"),
             "span_class": wall.get("span_class", "short"),
         })
 
-    # Floor slab dimensions
-    floor_w_m = round(boundary.get("width_px", 0) * scale, 2)
-    floor_d_m = round(boundary.get("height_px", 0) * scale, 2)
+    floor_w_m = round(float(boundary.get("width_px", 0)) * scale, 2)
+    floor_d_m = round(float(boundary.get("height_px", 0)) * scale, 2)
 
-    # Room centroids in 3D space
     three_rooms = []
     for room in rooms:
-        cx_m = round((room["centroid"]["x"] - center_x) * scale, 3)
-        cz_m = round((room["centroid"]["y"] - center_y) * scale, 3)
+        cx_m = round((float(room["centroid"]["x"]) - center_x) * scale, 3)
+        cz_m = round((float(room["centroid"]["y"]) - center_y) * scale, 3)
         three_rooms.append({
             "id": room.get("id"),
             "label": room.get("label", "Room"),
             "centroid_3d": {"x": cx_m, "y": 0.1, "z": cz_m},
-            "area_m2": room.get("area_m2", 0),
+            "area_m2": float(room.get("area_m2", 0)),
         })
 
     return {
@@ -268,7 +294,7 @@ def _build_three_payload(geometry_result: dict) -> dict:
             "depth_m": floor_d_m,
             "height_m": 3.0,
         },
-        "scale_used": scale,
+        "scale_used": float(scale),
     }
 
 

@@ -14,7 +14,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Set your preferred LLM: "claude" or "openai"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "claude")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
