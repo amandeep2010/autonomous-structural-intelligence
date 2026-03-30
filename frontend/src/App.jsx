@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Edges, Grid } from '@react-three/drei';
+import { Edges, Grid, OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 
 import FloorPlanUpload from './components/FloorPlanUpload.jsx';
+import AnnotatedPlanPanel from './components/AnnotatedPlanPanel.jsx';
 import ThreeViewer from './components/ThreeViewer.jsx';
 import MaterialTable from './components/MaterialTable.jsx';
 import ExplainPanel from './components/ExplainPanel.jsx';
@@ -13,18 +14,21 @@ import { logAnalysisOnChain } from './stellar/integration.js';
 // TEAMMATE'S LANDING — scroll-driven blueprint tour
 // ─────────────────────────────────────────────
 const cameraViews = [
-  { title: "Structural Intelligence", desc: "Upload a floor plan — our AI pipeline parses walls, reconstructs geometry in 3D, and recommends optimal construction materials.", position: new THREE.Vector3(0, 3, 12), target: new THREE.Vector3(0, 1.5, 0) },
-  { title: "Wall Detection", desc: "OpenCV Canny edge detection and HoughLinesP identify every wall segment, junction, and opening in your floor plan image.", position: new THREE.Vector3(1.5, 1.5, 2), target: new THREE.Vector3(1.5, 1.5, -2) },
-  { title: "3D Reconstruction", desc: "Shapely geometry reconstruction classifies load-bearing vs partition walls. Each wall extruded to 3m height with correct positioning.", position: new THREE.Vector3(-1.5, 1.5, 1.5), target: new THREE.Vector3(-1.5, 1.5, -1.5) },
-  { title: "Material Optimisation", desc: "Weighted tradeoff scoring selects optimal materials — strength 60%, durability 30%, cost 10% for load-bearing. Reversed for partitions.", position: new THREE.Vector3(-1.5, 1.5, -1.5), target: new THREE.Vector3(1.5, 1.5, -1.5) },
-  { title: "LLM Explainability", desc: "Every material recommendation explained in plain English with span measurements, structural concerns flagged, and cost breakdown.", position: new THREE.Vector3(1.5, 1.5, -1.5), target: new THREE.Vector3(0, 3.5, 0) },
-  { title: "Blockchain Verified", desc: "Analysis hash logged on Stellar Soroban testnet. Every structural report is immutably recorded with a certificate of authenticity.", position: new THREE.Vector3(8, 6, -8), target: new THREE.Vector3(0, 1.5, 0) },
+  { title: "Structural Intelligence", desc: "Upload a floor plan — our AI pipeline parses walls, reconstructs geometry in 3D, and recommends optimal construction materials.", position: new THREE.Vector3(0, 2.4, 12), target: new THREE.Vector3(0, 1.2, 0) },
+  { title: "Wall Detection", desc: "OpenCV Canny edge detection and HoughLinesP identify every wall segment, junction, and opening in your floor plan image.", position: new THREE.Vector3(2.2, 1.7, 3.4), target: new THREE.Vector3(1.2, 1.2, -1.6) },
+  { title: "3D Reconstruction", desc: "Shapely geometry reconstruction classifies load-bearing vs partition walls. Each wall extruded to 3m height with correct positioning.", position: new THREE.Vector3(-2.1, 1.8, 2.4), target: new THREE.Vector3(-1.3, 1.25, -1.8) },
+  { title: "Material Optimisation", desc: "Weighted tradeoff scoring selects optimal materials — strength 60%, durability 30%, cost 10% for load-bearing. Reversed for partitions.", position: new THREE.Vector3(-1.4, 5.2, -3.4), target: new THREE.Vector3(-0.5, 4.3, -0.8) },
+  { title: "LLM Explainability", desc: "Every material recommendation explained in plain English with span measurements, structural concerns flagged, and cost breakdown.", position: new THREE.Vector3(2.1, 5.6, -2.8), target: new THREE.Vector3(1.0, 4.6, -1.4) },
+  { title: "Blockchain Verified", desc: "Analysis hash logged on Stellar Soroban testnet. Every structural report is immutably recorded with a certificate of authenticity.", position: new THREE.Vector3(8, 7.5, -8), target: new THREE.Vector3(0, 3.3, 0) },
 ];
 
-const CameraController = ({ scrollProgressRef }) => {
+const CameraController = ({ scrollProgressRef, paused }) => {
   const { camera } = useThree();
   const currentLookAt = useRef(new THREE.Vector3(0, 1.5, 0));
   useFrame((state, delta) => {
+    if (paused) {
+      return;
+    }
     const rawProgress = scrollProgressRef.current * 5;
     const startIndex = Math.min(Math.floor(rawProgress), 4);
     const endIndex = Math.min(startIndex + 1, 5);
@@ -46,13 +50,32 @@ const BlueprintEdges = () => <Edges scale={1} threshold={15} color="#00ffff" />;
 const BlueprintHouse = () => (
   <group position={[0, -0.5, 0]}>
     <mesh position={[0, 1.5, 0]} material={blueprintMat}><boxGeometry args={[6, 3, 6]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 4.5, 0]} material={blueprintMat}><boxGeometry args={[6, 3, 6]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 3, 0]} material={blueprintMat}><boxGeometry args={[6.2, 0.12, 6.2]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 6.05, 0]} material={blueprintMat}><boxGeometry args={[6.4, 0.14, 6.4]} /><BlueprintEdges /></mesh>
+
     <mesh position={[0, 1.5, 0]} material={blueprintMat}><boxGeometry args={[0.1, 3, 6]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 4.5, 0]} material={blueprintMat}><boxGeometry args={[0.1, 3, 6]} /><BlueprintEdges /></mesh>
     <mesh position={[-1.5, 1.5, 0]} material={blueprintMat}><boxGeometry args={[3, 3, 0.1]} /><BlueprintEdges /></mesh>
-    <mesh position={[0, 4, 0]} rotation={[0, Math.PI / 4, 0]} material={blueprintMat}><coneGeometry args={[4.5, 2, 4]} /><BlueprintEdges /></mesh>
+    <mesh position={[1.5, 4.5, 0]} material={blueprintMat}><boxGeometry args={[3, 3, 0.1]} /><BlueprintEdges /></mesh>
+
     <mesh position={[1.5, 1, 3]} material={blueprintMat}><boxGeometry args={[1, 2, 0.1]} /><BlueprintEdges /></mesh>
     <mesh position={[-1.5, 1.5, 3]} material={blueprintMat}><boxGeometry args={[1.5, 1.2, 0.1]} /><BlueprintEdges /></mesh>
+    <mesh position={[1.5, 4, 3]} material={blueprintMat}><boxGeometry args={[1, 2, 0.1]} /><BlueprintEdges /></mesh>
+    <mesh position={[-1.5, 4.5, 3]} material={blueprintMat}><boxGeometry args={[1.5, 1.2, 0.1]} /><BlueprintEdges /></mesh>
+
+    <mesh position={[-3.05, 3, 0]} material={blueprintMat}><boxGeometry args={[0.12, 6, 6]} /><BlueprintEdges /></mesh>
+    <mesh position={[3.05, 3, 0]} material={blueprintMat}><boxGeometry args={[0.12, 6, 6]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 3, -3.05]} material={blueprintMat}><boxGeometry args={[6, 6, 0.12]} /><BlueprintEdges /></mesh>
+    <mesh position={[0, 3, 3.05]} material={blueprintMat}><boxGeometry args={[6, 6, 0.12]} /><BlueprintEdges /></mesh>
+
     {[-3, 0, 3].map((x, i) => [-3, 0, 3].map((z, j) => (
       <mesh key={`p-${i}-${j}`} position={[x, 1.5, z]} material={blueprintMat}>
+        <cylinderGeometry args={[0.1, 0.1, 3, 8]} /><BlueprintEdges />
+      </mesh>
+    )))}
+    {[-3, 0, 3].map((x, i) => [-3, 0, 3].map((z, j) => (
+      <mesh key={`p-upper-${i}-${j}`} position={[x, 4.5, z]} material={blueprintMat}>
         <cylinderGeometry args={[0.1, 0.1, 3, 8]} /><BlueprintEdges />
       </mesh>
     )))}
@@ -62,13 +85,19 @@ const BlueprintHouse = () => (
 
 function LandingPage({ onEnter }) {
   const [activeIndex, setActiveIndex] = useState(0);
+  const [manualCameraControl, setManualCameraControl] = useState(false);
   const scrollProgressRef = useRef(0);
+  const lastScrollProgress = useRef(0);
 
   useEffect(() => {
     const handleScroll = () => {
       const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
       const progress = maxScroll > 0 ? window.scrollY / maxScroll : 0;
       scrollProgressRef.current = Math.max(0, Math.min(1, progress));
+      if (Math.abs(scrollProgressRef.current - lastScrollProgress.current) > 0.0005) {
+        setManualCameraControl(false);
+      }
+      lastScrollProgress.current = scrollProgressRef.current;
       const newIndex = Math.min(Math.floor(scrollProgressRef.current * 5.99), 5);
       setActiveIndex(newIndex);
     };
@@ -88,7 +117,21 @@ function LandingPage({ onEnter }) {
           <ambientLight intensity={0.4} />
           <directionalLight position={[10, 15, 10]} intensity={2} color="#ccffff" />
           <BlueprintHouse />
-          <CameraController scrollProgressRef={scrollProgressRef} />
+          <CameraController scrollProgressRef={scrollProgressRef} paused={manualCameraControl} />
+          <OrbitControls
+            enableRotate
+            enablePan={false}
+            enableZoom={false}
+            enableDamping
+            dampingFactor={0.08}
+            rotateSpeed={0.75}
+            mouseButtons={{
+              LEFT: THREE.MOUSE.ROTATE,
+              MIDDLE: THREE.MOUSE.DOLLY,
+              RIGHT: THREE.MOUSE.PAN,
+            }}
+            onStart={() => setManualCameraControl(true)}
+          />
         </Canvas>
       </div>
 
@@ -141,6 +184,24 @@ function LandingPage({ onEnter }) {
           <div style={{ fontSize: '1rem' }}>↓</div>
         </div>
       )}
+
+      <div style={{
+        position: 'fixed',
+        top: '2rem',
+        right: '2rem',
+        zIndex: 10,
+        color: 'rgba(0,255,255,0.42)',
+        fontSize: '0.62rem',
+        letterSpacing: '2px',
+        fontFamily: "'Courier New', monospace",
+        textAlign: 'right',
+        lineHeight: 1.8,
+        pointerEvents: 'none',
+      }}>
+        LEFT-DRAG TO MOVE POV
+        <br />
+        SCROLL TO RESUME TOUR
+      </div>
     </div>
   );
 }
@@ -186,7 +247,7 @@ function LoadingScreen() {
 // RESULTS DASHBOARD
 // ─────────────────────────────────────────────
 function ResultsDashboard({ result, onReset }) {
-  const [activePanel, setActivePanel] = useState('3d');
+  const [activePanel, setActivePanel] = useState('review');
   const [stellar, setStellar] = useState({ loading: true, txHash: null, explorerUrl: null });
 
   useEffect(() => {
@@ -196,6 +257,7 @@ function ResultsDashboard({ result, onReset }) {
   const stats = [
     { label: 'WALLS', value: result?.geometry?.stats?.total_walls ?? result?.three_js?.walls?.length ?? '—' },
     { label: 'ROOMS', value: result?.geometry?.stats?.total_rooms ?? result?.three_js?.rooms?.length ?? '—' },
+    { label: 'DOORS', value: result?.artifacts?.door_count ?? result?.three_js?.doors?.length ?? '—' },
     { label: 'LOAD-BEARING', value: result?.geometry?.stats?.load_bearing_walls ?? result?.three_js?.walls?.filter(w => w.load_bearing).length ?? '—' },
     { label: 'FALLBACK', value: result?.fallback_used ? 'YES' : 'NO' },
   ];
@@ -258,7 +320,7 @@ function ResultsDashboard({ result, onReset }) {
 
       {/* Panel tabs */}
       <div style={{ borderBottom: '1px solid rgba(0,255,255,0.1)', padding: '0 2rem', display: 'flex', flexShrink: 0 }}>
-        {[{ key: '3d', label: '3D MODEL' }, { key: 'materials', label: 'MATERIALS' }, { key: 'report', label: 'AI REPORT' }].map(p => (
+        {[{ key: 'review', label: '2D REVIEW' }, { key: '3d', label: '3D MODEL' }, { key: 'materials', label: 'MATERIALS' }, { key: 'report', label: 'AI REPORT' }].map(p => (
           <button key={p.key} onClick={() => setActivePanel(p.key)} style={{
             background: 'none', border: 'none',
             borderBottom: activePanel === p.key ? '2px solid #00ffff' : '2px solid transparent',
@@ -271,6 +333,7 @@ function ResultsDashboard({ result, onReset }) {
 
       {/* Panel content */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
+        {activePanel === 'review' && <AnnotatedPlanPanel artifacts={result?.artifacts} />}
         {activePanel === '3d' && (
           result?.three_js
             ? <ThreeViewer threeJsData={result.three_js} />

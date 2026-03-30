@@ -7,6 +7,7 @@ Stage 1 & 2: Floor Plan Parser
 
 import base64
 import logging
+import math
 import re
 from collections import defaultdict
 from typing import Optional
@@ -135,6 +136,7 @@ def parse_floor_plan(image_input) -> dict:
     openings = _detect_openings(wall_segments)
     openings = _attach_door_arcs(gray, text_regions, openings)
     windows = _detect_windows(gray, text_regions, img.shape)
+    openings.extend(_recover_doors_from_symbols(gray, text_regions, wall_segments, openings, windows))
     openings.extend(windows)
 
     # Scale factor: convert pixels to meters
@@ -657,18 +659,318 @@ def _attach_door_arcs(gray: np.ndarray, text_regions: list, openings: list) -> l
     )
     symbol_mask = _mask_text_regions(symbol_mask, text_regions, TEXT_MASK_PADDING)
     contours, _ = cv2.findContours(symbol_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    diagonal_clusters = _extract_diagonal_symbol_clusters(symbol_mask)
 
     for opening in openings:
         arc = _find_door_arc_for_opening(opening, contours)
-        if arc is None:
+        if arc is None and _should_synthesise_door_arc(opening, image_shape, diagonal_clusters):
             arc = _synthesise_door_arc(opening, image_shape)
         if arc:
             opening["type"] = "door"
             opening["door_arc"] = arc
+            opening["center"] = {
+                "x": round((opening["x1"] + opening["x2"]) / 2),
+                "y": round((opening["y1"] + opening["y2"]) / 2),
+            }
+            opening["bbox"] = _build_door_bbox(opening, arc, image_shape)
         else:
             opening["type"] = "opening"
+            opening.pop("door_arc", None)
+            opening.pop("center", None)
+            opening.pop("bbox", None)
 
     return openings
+
+
+def _should_synthesise_door_arc(opening: dict, image_shape: tuple, diagonal_clusters: list) -> bool:
+    width = float(opening.get("width_px", 0))
+    if width < OPENING_MIN_PX or width > min(OPENING_MAX_PX, 110):
+        return False
+
+    image_h, image_w = image_shape[:2]
+    center_x = (float(opening["x1"]) + float(opening["x2"])) / 2
+    center_y = (float(opening["y1"]) + float(opening["y2"])) / 2
+    margin_x = max(8.0, image_w * 0.01)
+    margin_y = max(8.0, image_h * 0.01)
+
+    inside_image = (
+        margin_x <= center_x <= image_w - margin_x and
+        margin_y <= center_y <= image_h - margin_y
+    )
+    if not inside_image:
+        return False
+
+    return _opening_has_symbol_support(opening, diagonal_clusters)
+
+
+def _extract_diagonal_symbol_clusters(symbol_mask: np.ndarray) -> list:
+    lines = cv2.HoughLinesP(
+        symbol_mask,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=18,
+        minLineLength=10,
+        maxLineGap=8,
+    )
+    if lines is None:
+        return []
+
+    segments = []
+    for raw in lines[:, 0]:
+        x1, y1, x2, y2 = [int(v) for v in raw]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 10 or length > 110:
+            continue
+        angle = abs(math.degrees(math.atan2(dy, dx))) % 180
+        angle = min(angle, 180 - angle)
+        if angle < 12 or angle > 78:
+            continue
+        segments.append({
+            "points": (x1, y1, x2, y2),
+            "mid_x": (x1 + x2) / 2,
+            "mid_y": (y1 + y2) / 2,
+        })
+
+    clusters = []
+    used = set()
+    for idx, segment in enumerate(segments):
+        if idx in used:
+            continue
+
+        pending = [idx]
+        used.add(idx)
+        cluster_indices = []
+        while pending:
+            current = pending.pop()
+            cluster_indices.append(current)
+            origin = segments[current]
+            for other_idx, other in enumerate(segments):
+                if other_idx in used:
+                    continue
+                if abs(origin["mid_x"] - other["mid_x"]) <= 90 and abs(origin["mid_y"] - other["mid_y"]) <= 90:
+                    used.add(other_idx)
+                    pending.append(other_idx)
+
+        points = []
+        for cluster_idx in cluster_indices:
+            x1, y1, x2, y2 = segments[cluster_idx]["points"]
+            points.extend([(x1, y1), (x2, y2)])
+
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        bbox = {
+            "x": min(xs),
+            "y": min(ys),
+            "width": max(xs) - min(xs),
+            "height": max(ys) - min(ys),
+        }
+        if len(cluster_indices) < 2:
+            continue
+        if not (28 <= bbox["width"] <= 170 and 28 <= bbox["height"] <= 170):
+            continue
+
+        clusters.append({
+            "bbox": bbox,
+            "center": {
+                "x": round(bbox["x"] + bbox["width"] / 2),
+                "y": round(bbox["y"] + bbox["height"] / 2),
+            },
+            "count": len(cluster_indices),
+        })
+
+    return clusters
+
+
+def _opening_has_symbol_support(opening: dict, diagonal_clusters: list) -> bool:
+    center_x = (float(opening["x1"]) + float(opening["x2"])) / 2
+    center_y = (float(opening["y1"]) + float(opening["y2"])) / 2
+    width = max(float(opening.get("width_px", 0)), OPENING_MIN_PX)
+    for cluster in diagonal_clusters:
+        bbox = cluster["bbox"]
+        padding = max(72.0, width * 1.25)
+        if (
+            bbox["x"] - padding <= center_x <= bbox["x"] + bbox["width"] + padding and
+            bbox["y"] - padding <= center_y <= bbox["y"] + bbox["height"] + padding
+        ):
+            return True
+    return False
+
+
+def _recover_doors_from_symbols(gray: np.ndarray, text_regions: list, walls: list, openings: list, windows: list) -> list:
+    image_shape = gray.shape
+    raw_symbol_mask = cv2.adaptiveThreshold(
+        cv2.GaussianBlur(gray, (3, 3), 0),
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 15, 4
+    )
+    masked_symbol_mask = _mask_text_regions(raw_symbol_mask, text_regions, TEXT_MASK_PADDING)
+    candidates = _extract_diagonal_symbol_clusters(masked_symbol_mask)
+    candidates.extend(_extract_diagonal_symbol_clusters(raw_symbol_mask))
+    recovered = []
+    existing_boxes = [opening.get("bbox") for opening in openings if opening.get("bbox")]
+    window_boxes = [window.get("bbox") for window in windows if window.get("bbox")]
+
+    for cluster in candidates:
+        if any(_bboxes_overlap(cluster["bbox"], box) for box in existing_boxes):
+            continue
+        if any(_bboxes_overlap(cluster["bbox"], window_box, padding=6) for window_box in window_boxes):
+            continue
+        door = _build_symbol_door_candidate(cluster, walls, image_shape)
+        if door is None:
+            continue
+        if any(_bboxes_overlap(door["bbox"], box) for box in existing_boxes):
+            continue
+        existing_boxes.append(door["bbox"])
+        recovered.append(door)
+
+    return recovered
+
+
+def _build_symbol_door_candidate(cluster: dict, walls: list, image_shape: tuple) -> Optional[dict]:
+    bbox = cluster["bbox"]
+    corners = {
+        "top_left": {"x": bbox["x"], "y": bbox["y"]},
+        "top_right": {"x": bbox["x"] + bbox["width"], "y": bbox["y"]},
+        "bottom_right": {"x": bbox["x"] + bbox["width"], "y": bbox["y"] + bbox["height"]},
+        "bottom_left": {"x": bbox["x"], "y": bbox["y"] + bbox["height"]},
+    }
+
+    best_name = None
+    best_score = None
+    best_support = None
+    for name, corner in corners.items():
+        support = _corner_wall_support(corner, walls)
+        score = support["horizontal_distance"] + support["vertical_distance"]
+        if min(support["horizontal_distance"], support["vertical_distance"]) > 55:
+            continue
+        if max(support["horizontal_distance"], support["vertical_distance"]) > 170:
+            continue
+        if score > 210:
+            continue
+        if best_score is None or score < best_score:
+            best_name = name
+            best_score = score
+            best_support = support
+
+    if best_name is None:
+        return None
+
+    radius = max(28, min(OPENING_MAX_PX, int(round(max(bbox["width"], bbox["height"])))))
+    hinge = corners[best_name]
+    arc = _build_corner_arc(best_name, hinge, radius)
+    if arc is None:
+        return None
+
+    orientation = "horizontal" if best_support["horizontal_distance"] <= best_support["vertical_distance"] else "vertical"
+    if orientation == "horizontal":
+        if "left" in best_name:
+            x1, x2 = hinge["x"], min(image_shape[1] - 1, hinge["x"] + radius)
+        else:
+            x1, x2 = max(0, hinge["x"] - radius), hinge["x"]
+        y1 = y2 = hinge["y"]
+    else:
+        if "top" in best_name:
+            y1, y2 = hinge["y"], min(image_shape[0] - 1, hinge["y"] + radius)
+        else:
+            y1, y2 = max(0, hinge["y"] - radius), hinge["y"]
+        x1 = x2 = hinge["x"]
+
+    return {
+        "id": f"door_symbol_{cluster['center']['x']}_{cluster['center']['y']}",
+        "type": "door",
+        "orientation": orientation,
+        "x1": int(x1),
+        "y1": int(y1),
+        "x2": int(x2),
+        "y2": int(y2),
+        "width_px": int(radius),
+        "hinge_candidates": [dict(hinge)],
+        "door_arc": arc,
+        "center": dict(cluster["center"]),
+        "bbox": dict(bbox),
+    }
+
+
+def _corner_wall_support(corner: dict, walls: list) -> dict:
+    horizontal_distance = 9999.0
+    vertical_distance = 9999.0
+
+    for wall in walls:
+        if wall["orientation"] == "horizontal":
+            x_min = min(wall["x1"], wall["x2"]) - 28
+            x_max = max(wall["x1"], wall["x2"]) + 28
+            if x_min <= corner["x"] <= x_max:
+                horizontal_distance = min(horizontal_distance, abs(corner["y"] - wall["y1"]))
+        else:
+            y_min = min(wall["y1"], wall["y2"]) - 28
+            y_max = max(wall["y1"], wall["y2"]) + 28
+            if y_min <= corner["y"] <= y_max:
+                vertical_distance = min(vertical_distance, abs(corner["x"] - wall["x1"]))
+
+    return {
+        "horizontal_distance": horizontal_distance,
+        "vertical_distance": vertical_distance,
+    }
+
+
+def _build_corner_arc(corner_name: str, hinge: dict, radius: int) -> Optional[dict]:
+    configs = {
+        "top_left": (0.0, 90.0),
+        "top_right": (90.0, 180.0),
+        "bottom_right": (180.0, 270.0),
+        "bottom_left": (-90.0, 0.0),
+    }
+    if corner_name not in configs:
+        return None
+
+    start_angle_deg, end_angle_deg = configs[corner_name]
+    end_angle_rad = math.radians(end_angle_deg)
+    return {
+        "hinge": {"x": int(hinge["x"]), "y": int(hinge["y"])},
+        "radius_px": float(radius),
+        "start_angle_deg": float(start_angle_deg),
+        "end_angle_deg": float(end_angle_deg),
+        "leaf_end": {
+            "x": round(float(hinge["x"] + math.cos(end_angle_rad) * radius)),
+            "y": round(float(hinge["y"] + math.sin(end_angle_rad) * radius)),
+        },
+    }
+
+
+def _bboxes_overlap(a: Optional[dict], b: Optional[dict], padding: int = 18) -> bool:
+    if not a or not b:
+        return False
+    ax1 = a["x"] - padding
+    ay1 = a["y"] - padding
+    ax2 = a["x"] + a["width"] + padding
+    ay2 = a["y"] + a["height"] + padding
+    bx1 = b["x"]
+    by1 = b["y"]
+    bx2 = b["x"] + b["width"]
+    by2 = b["y"] + b["height"]
+    return min(ax2, bx2) >= max(ax1, bx1) and min(ay2, by2) >= max(ay1, by1)
+
+
+def _build_door_bbox(opening: dict, arc: dict, image_shape: tuple) -> dict:
+    image_h, image_w = image_shape[:2]
+    x_values = [opening["x1"], opening["x2"], arc["hinge"]["x"], arc["leaf_end"]["x"]]
+    y_values = [opening["y1"], opening["y2"], arc["hinge"]["y"], arc["leaf_end"]["y"]]
+    padding = max(8, int(round(float(opening.get("width_px", OPENING_MIN_PX)) * 0.18)))
+
+    x1 = max(0, int(round(min(x_values) - padding)))
+    y1 = max(0, int(round(min(y_values) - padding)))
+    x2 = min(image_w - 1, int(round(max(x_values) + padding)))
+    y2 = min(image_h - 1, int(round(max(y_values) + padding)))
+
+    return {
+        "x": x1,
+        "y": y1,
+        "width": max(1, x2 - x1),
+        "height": max(1, y2 - y1),
+    }
 
 
 def _detect_windows(gray: np.ndarray, text_regions: list, image_shape: tuple, relaxed: bool = False) -> list:

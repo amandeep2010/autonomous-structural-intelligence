@@ -14,6 +14,7 @@ import math
 import logging
 import traceback
 import hashlib
+import base64
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -79,6 +80,20 @@ def health():
     return {"status": "ok", "pipeline": "ready"}
 
 
+@app.get("/api/history")
+def get_history(limit: int = 20):
+    limit = max(1, min(limit, 100))
+    return {"success": True, "items": _list_saved_analyses(limit=limit)}
+
+
+@app.get("/api/history/{analysis_id}")
+def get_history_item(analysis_id: str):
+    payload = _load_saved_analysis_payload(analysis_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Saved analysis not found")
+    return JSONResponse(to_json_safe(payload))
+
+
 # ── Full Pipeline (primary endpoint) ─────────────────────────────────────────
 
 @app.post("/api/pipeline")
@@ -114,6 +129,7 @@ async def run_pipeline(file: UploadFile = File(...)):
             parse_result.get("labels", []),
         )
         verification = verify_generated_model(img, parse_result, three_payload)
+        artifacts = _build_artifacts(img, parse_result.get("openings", []))
 
         payload = {
             "success": True,
@@ -132,6 +148,7 @@ async def run_pipeline(file: UploadFile = File(...)):
                 "structural_concerns": geometry_result.get("structural_concerns", []),
             },
             "three_js": three_payload,
+            "artifacts": artifacts,
             "verification": verification,
             "materials": material_result,
             "report": report,
@@ -167,6 +184,7 @@ async def parse_only(file: UploadFile = File(...)):
             "success": True,
             "parse": parse_result,
             "geometry": geometry_result,
+            "artifacts": _build_artifacts(img, parse_result.get("openings", [])),
             "three_js": _build_three_payload(
                 geometry_result,
                 parse_result.get("openings", []),
@@ -408,6 +426,66 @@ def _persist_analysis(filename: str, contents: bytes, payload: dict) -> dict:
     }
 
 
+def _build_artifacts(image: np.ndarray, openings: list) -> dict:
+    annotated = _render_annotated_image(image, openings)
+    success, buffer = cv2.imencode(".png", annotated)
+    if not success:
+        raise ValueError("Could not encode annotated image artifact")
+
+    return {
+        "annotated_image_base64": base64.b64encode(buffer.tobytes()).decode("ascii"),
+        "annotated_image_mime": "image/png",
+        "door_count": sum(1 for opening in openings if opening.get("type") == "door"),
+    }
+
+
+def _render_annotated_image(image: np.ndarray, openings: list) -> np.ndarray:
+    annotated = image.copy()
+    for opening in openings:
+        if opening.get("type") != "door":
+            continue
+
+        bbox = opening.get("bbox")
+        if not bbox:
+            bbox = _fallback_bbox_from_opening(opening, image.shape)
+
+        x1 = max(0, int(bbox.get("x", 0)))
+        y1 = max(0, int(bbox.get("y", 0)))
+        x2 = min(image.shape[1] - 1, x1 + max(1, int(bbox.get("width", 1))))
+        y2 = min(image.shape[0] - 1, y1 + max(1, int(bbox.get("height", 1))))
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (36, 28, 237), 3)
+        label_y = max(20, y1 - 10)
+        cv2.putText(
+            annotated,
+            "DOOR",
+            (x1, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (36, 28, 237),
+            2,
+            cv2.LINE_AA,
+        )
+
+    return annotated
+
+
+def _fallback_bbox_from_opening(opening: dict, image_shape: tuple) -> dict:
+    image_h, image_w = image_shape[:2]
+    x1 = min(int(opening.get("x1", 0)), int(opening.get("x2", 0)))
+    y1 = min(int(opening.get("y1", 0)), int(opening.get("y2", 0)))
+    x2 = max(int(opening.get("x1", 0)), int(opening.get("x2", 0)))
+    y2 = max(int(opening.get("y1", 0)), int(opening.get("y2", 0)))
+    padding = max(8, int(round(float(opening.get("width_px", 24)) * 0.2)))
+
+    return {
+        "x": max(0, x1 - padding),
+        "y": max(0, y1 - padding),
+        "width": max(1, min(image_w - 1, x2 + padding) - max(0, x1 - padding)),
+        "height": max(1, min(image_h - 1, y2 + padding) - max(0, y1 - padding)),
+    }
+
+
 def _build_analysis_id(filename: str, contents: bytes) -> str:
     timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     digest = hashlib.sha256(contents).hexdigest()[:10]
@@ -418,6 +496,73 @@ def _build_analysis_id(filename: str, contents: bytes) -> str:
 def _safe_filename(filename: str) -> str:
     path = Path(filename or "upload.png")
     return f"{_safe_slug(path.stem)}{path.suffix or '.png'}"
+
+
+def _list_saved_analyses(limit: int = 20) -> list:
+    if not UPLOADS_DIR.exists():
+        return []
+
+    items = []
+    run_dirs = sorted(
+        [path for path in UPLOADS_DIR.iterdir() if path.is_dir()],
+        key=lambda path: path.name,
+        reverse=True,
+    )
+
+    for run_dir in run_dirs:
+        meta_path = run_dir / "meta.json"
+        analysis_path = run_dir / "analysis.json"
+        if not meta_path.exists() or not analysis_path.exists():
+            continue
+
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Skipping unreadable saved analysis in %s", run_dir)
+            continue
+
+        items.append(_summarize_saved_analysis(meta, payload))
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def _load_saved_analysis_payload(analysis_id: str) -> Optional[dict]:
+    if not analysis_id or "/" in analysis_id or "\\" in analysis_id or ".." in analysis_id:
+        return None
+
+    run_dir = UPLOADS_DIR / analysis_id
+    analysis_path = run_dir / "analysis.json"
+    if not analysis_path.exists():
+        return None
+
+    try:
+        return json.loads(analysis_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to load saved analysis %s", analysis_id)
+        return None
+
+
+def _summarize_saved_analysis(meta: dict, payload: dict) -> dict:
+    three_data = payload.get("three_js", {})
+    geometry = payload.get("geometry", {})
+    verification = payload.get("verification", {})
+
+    return {
+        "analysis_id": meta.get("analysis_id"),
+        "original_filename": meta.get("original_filename"),
+        "saved_at": meta.get("saved_at"),
+        "fallback_used": bool(payload.get("fallback_used", False)),
+        "wall_count": len(three_data.get("walls", [])),
+        "room_count": len(three_data.get("rooms", [])),
+        "window_count": len(three_data.get("windows", [])),
+        "door_count": len(three_data.get("doors", [])),
+        "load_bearing_count": sum(1 for wall in three_data.get("walls", []) if wall.get("load_bearing")),
+        "issue_count": len(verification.get("issues", [])),
+        "boundary": geometry.get("boundary", {}),
+    }
 
 
 def _safe_slug(value: str) -> str:
